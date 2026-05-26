@@ -140,6 +140,7 @@ class CloudAIGymEnv(BaseGym):
                 - done (bool): Whether the episode is done.
                 - info (dict): Additional info for debugging.
         """
+        self.test_run.increment_step()
         self.test_run = self.test_run.apply_params_set(action)
 
         for observer in self.observers:
