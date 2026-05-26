@@ -593,6 +593,71 @@ def test_env_csv_is_step_aligned_with_trajectory(nemorun: NeMoRunTestDefinition,
     )
 
 
+def test_step_cache_hit_with_declared_env_params_still_writes_env_csv(
+    nemorun: NeMoRunTestDefinition, tmp_path: Path
+) -> None:
+    """End-to-end: cache HIT under observer-driven env_params still records env.csv.
+
+    This is the contract that was broken before the fix. With env_params
+    declared on the TestDefinition, ``CloudAIGymEnv`` must fire its
+    EnvParamsObserver *before* the cache lookup so every trial - hit or
+    miss - appends to env.csv and stays step-aligned with trajectory.csv.
+    Asserts: (a) the workload is NOT re-run (cache short-circuit), (b)
+    env.csv gains a row, (c) trajectory.csv gains a row carrying the
+    sampled env_params.
+    """
+    import random as _random
+
+    tdef = nemorun.model_copy(deep=True)
+    tdef.cmd_args.data.global_batch_size = 8
+    tdef.agent_metrics = ["default"]
+    tdef.env_params = {"drop_rate": EnvParamSpec(values=[0.0, 0.001, 0.01])}
+    tdef.agent_config = {"random_seed": 42}
+
+    test_run = TestRun(
+        name="dr_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        output_path=tmp_path / "out" / "dr_tr" / "0",
+        reports={NeMoRunReportGenerationStrategy},
+    )
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+    runner.test_scenario = TestScenario(name="dr_scenario", test_runs=[test_run])
+    runner.jobs, runner.testrun_to_job_map, runner.shutting_down = {}, {}, False
+    runner.get_job_output_path.return_value = test_run.output_path
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+    assert env.observers, "TestDefinition.env_params declared -> observer must be built"
+
+    expected_sample = {"drop_rate": _random.Random("42:drop_rate:1").choice([0.0, 0.001, 0.01])}
+    action = {"trainer.max_steps": 1000}
+    env.test_run.current_iteration = 0
+    env.trajectory = {
+        0: [TrajectoryEntry(step=0, action=action, reward=0.42, observation=[0.84], env_params=expected_sample)]
+    }
+    env.test_run.step = 1
+
+    with patch.object(env, "get_observation", side_effect=AssertionError("cache miss path must not run")):
+        obs, reward, _done, _info = env.step(action)
+
+    runner.run.assert_not_called()
+    assert reward == 0.42 and obs == [0.84]
+
+    env_csv = env._env_csv_path()
+    assert env_csv.exists(), "cache HIT must NOT skip the observer; env.csv must record the trial"
+    env_rows = env_csv.read_text().strip().splitlines()
+    assert env_rows[0] == "step,env"
+    assert env_rows[1].startswith("1,"), f"expected step 1 row in env.csv, got {env_rows[1]!r}"
+
+    traj_rows = env.trajectory[0]
+    assert len(traj_rows) == 2 and traj_rows[-1].env_params == expected_sample, (
+        "cache-hit trajectory entry must record the per-trial env_params sample"
+    )
+
+
 def test_no_env_csv_when_env_params_not_declared(nemorun: NeMoRunTestDefinition, tmp_path: Path) -> None:
     """Workloads without [env_params.*] pay zero overhead: no observer, no env.csv."""
     tdef = nemorun.model_copy(deep=True)
