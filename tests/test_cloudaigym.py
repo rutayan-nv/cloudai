@@ -584,8 +584,7 @@ def test_env_csv_is_step_aligned_with_trajectory(nemorun: NeMoRunTestDefinition,
 
     with patch.object(env, "get_observation", side_effect=lambda _action: next(fake_obs)):
         env.test_run.step = 0
-        for step_idx, action in enumerate((action_a, action_b, action_a), start=1):
-            env.test_run.step = step_idx
+        for action in (action_a, action_b, action_a):
             env.step(action)
 
     env_csv = env._env_csv_path()
@@ -644,7 +643,7 @@ def test_step_cache_hit_with_declared_env_params_still_writes_env_csv(
     env.trajectory = {
         0: [TrajectoryEntry(step=0, action=action, reward=0.42, observation=[0.84], env_params=expected_sample)]
     }
-    env.test_run.step = 1
+    env.test_run.step = 0
 
     with patch.object(env, "get_observation", side_effect=AssertionError("cache miss path must not run")):
         obs, reward, _done, _info = env.step(action)
