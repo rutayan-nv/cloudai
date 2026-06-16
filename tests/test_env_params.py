@@ -43,6 +43,7 @@ from cloudai.configurator.env_params import (
     EnvParamsObserver,
     EnvParamSpec,
     EnvParamsSampler,
+    ObsLeafDescriptor,
 )
 from cloudai.models.workload import CmdArgs, TestDefinition
 
@@ -268,3 +269,31 @@ def test_is_dse_job_true_when_a_real_action_dimension_exists() -> None:
     """An un-annotated cmd_args list is a real action dimension -> DSE, even alongside env_params."""
     tdef = _tdef({"ball_speed": EnvParamSpec()}, ball_speed=[1, 2, 3], paddle_width=[4, 8])
     assert tdef.is_dse_job is True
+
+
+# --- ObsLeafDescriptor: structured-observation leaf schema ---
+
+
+def test_obs_leaf_descriptor_box_defaults() -> None:
+    leaf = ObsLeafDescriptor(kind="box", dim=2)
+    assert leaf.kind == "box"
+    assert leaf.dim == 2
+    assert leaf.n is None
+
+
+def test_obs_leaf_descriptor_discrete_requires_n() -> None:
+    leaf = ObsLeafDescriptor(kind="discrete", dim=1, n=3)
+    assert leaf.n == 3
+    with pytest.raises(ValidationError, match="requires n"):
+        ObsLeafDescriptor(kind="discrete", dim=1)
+    with pytest.raises(ValidationError, match="requires n"):
+        ObsLeafDescriptor(kind="discrete", dim=1, n=0)
+
+
+def test_obs_leaf_descriptor_rejects_bad_dim_and_extra_fields() -> None:
+    with pytest.raises(ValidationError, match="dim must be"):
+        ObsLeafDescriptor(kind="box", dim=0)
+    with pytest.raises(ValidationError):
+        ObsLeafDescriptor(kind="box", dim=1, unexpected=1)
+    with pytest.raises(ValidationError):
+        ObsLeafDescriptor(kind="categorical", dim=1)
