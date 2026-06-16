@@ -38,6 +38,7 @@ from cloudai.core import (
     Runner,
     System,
     TestParser,
+    TestRun,
     TestScenario,
     TestScenarioParsingError,
 )
@@ -298,20 +299,31 @@ def _check_installation(
     return result
 
 
+def _is_dse_or_live_rl(tr: TestRun) -> bool:
+    """
+    Return True for agent-driven runs, which ``handle_dse_job`` orchestrates via ``agent.run()``.
+
+    A DSE sweep declares a TOML param space (``is_dse_job``). An online live-RL run carries no
+    sweep (so ``is_dse_job`` is False) but still drives the agent's own ``run()`` loop; it opts in
+    with ``cmd_args.live_rl_mode``.
+    """
+    return tr.is_dse_job or bool(getattr(tr.test.cmd_args, "live_rl_mode", False))
+
+
 def validate_dse_env_params(test_scenario: TestScenario) -> None:
     """
-    Reject prepped configs that declare env_params on a non-DSE test run.
+    Reject prepped configs that declare env_params on a non-agent-driven test run.
 
-    env_params are sampled only during DSE (by CloudAIGymEnv); on a non-DSE run they would be
-    silently ignored. is_dse_job is a property of the fully prepped config, so this is validated
-    here rather than at parse time.
+    env_params are sampled only by CloudAIGymEnv during agent-driven runs (DSE or live-RL); on a
+    plain run they would be silently ignored. Agent-driven status is a property of the fully
+    prepped config, so this is validated here rather than at parse time.
     """
-    offenders = [tr.name for tr in test_scenario.test_runs if tr.test.env_params and not tr.is_dse_job]
+    offenders = [tr.name for tr in test_scenario.test_runs if tr.test.env_params and not _is_dse_or_live_rl(tr)]
     if offenders:
         raise TestScenarioParsingError(
-            f"Tests {offenders} declare env_params but are not DSE jobs. env_params are sampled only during "
-            "DSE (by CloudAIGymEnv); add a sweep (a list-valued cmd_args/extra_env_vars entry or num_nodes) "
-            "or remove env_params."
+            f"Tests {offenders} declare env_params but are not agent-driven (DSE or live-RL). env_params are "
+            "sampled only by CloudAIGymEnv; add a DSE sweep (a list-valued cmd_args/extra_env_vars entry or "
+            "num_nodes) or cmd_args.live_rl_mode, or remove env_params."
         )
 
 
@@ -359,15 +371,15 @@ def handle_dry_run_and_run(args: argparse.Namespace) -> int:
     register_signal_handlers(runner.cancel_on_signal)
     logging.info(f"Scenario results will be stored at: {runner.runner.scenario_root}")
 
-    has_dse = any(tr.is_dse_job for tr in test_scenario.test_runs)
-    if args.single_sbatch or not has_dse:  # in this mode cases are unrolled using grid search
+    agent_driven = [_is_dse_or_live_rl(tr) for tr in test_scenario.test_runs]
+    if args.single_sbatch or not any(agent_driven):  # in this mode cases are unrolled using grid search
         handle_non_dse_job(runner, args)
         return 0
 
-    if all(tr.is_dse_job for tr in test_scenario.test_runs):
+    if all(agent_driven):
         return handle_dse_job(runner, args)
 
-    logging.error("Mixing DSE and non-DSE jobs is not allowed.")
+    logging.error("Mixing agent-driven (DSE / live-RL) and plain jobs is not allowed.")
     return 1
 
 
