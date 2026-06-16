@@ -29,6 +29,7 @@ from cloudai.configurator.env_params import (
     EnvParamsObserver,
     EnvParamSpec,
     EnvParamsSampler,
+    ObsLeafDescriptor,
 )
 
 
@@ -112,3 +113,28 @@ def test_observer_after_step_is_noop() -> None:
     observer.after_step(test_run, observation=[0.0], reward=0.0)
 
     assert test_run.current_env_params == {"x": 1}
+
+
+def test_obs_leaf_descriptor_box_defaults() -> None:
+    leaf = ObsLeafDescriptor(kind="box", dim=2)
+    assert leaf.kind == "box"
+    assert leaf.dim == 2
+    assert leaf.n is None
+
+
+def test_obs_leaf_descriptor_discrete_requires_n() -> None:
+    leaf = ObsLeafDescriptor(kind="discrete", dim=1, n=3)
+    assert leaf.n == 3
+    with pytest.raises(ValidationError, match="requires n"):
+        ObsLeafDescriptor(kind="discrete", dim=1)
+    with pytest.raises(ValidationError, match="requires n"):
+        ObsLeafDescriptor(kind="discrete", dim=1, n=0)
+
+
+def test_obs_leaf_descriptor_rejects_bad_dim_and_extra_fields() -> None:
+    with pytest.raises(ValidationError, match="dim must be"):
+        ObsLeafDescriptor(kind="box", dim=0)
+    with pytest.raises(ValidationError):
+        ObsLeafDescriptor(kind="box", dim=1, unexpected=1)
+    with pytest.raises(ValidationError):
+        ObsLeafDescriptor(kind="categorical", dim=1)
