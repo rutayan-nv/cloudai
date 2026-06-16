@@ -38,6 +38,7 @@ from cloudai.core import (
     Runner,
     System,
     TestParser,
+    TestRun,
     TestScenario,
     TestScenarioParsingError,
 )
@@ -298,27 +299,42 @@ def _check_installation(
     return result
 
 
+def _is_dse_or_live_rl(tr: TestRun) -> bool:
+    """
+    Return True for agent-driven runs, which ``handle_dse_job`` orchestrates via ``agent.run()``.
+
+    A DSE sweep declares a TOML param space (``is_dse_job``). An online live-RL run carries no
+    sweep (so ``is_dse_job`` is False) but still drives the agent's own ``run()`` loop; it opts in
+    with ``cmd_args.live_rl_mode``.
+    """
+    return tr.is_dse_job or bool(getattr(tr.test.cmd_args, "live_rl_mode", False))
+
+
 def validate_dse_env_params(test_scenario: TestScenario) -> None:
     """
     Reject prepped configs that declare env_params but cannot sample them.
 
-    env_params are sampled per-trial by CloudAIGymEnv, but only for a DSE run on a *learning*
-    agent. A non-DSE run has no per-trial loop at all, and grid_search exhaustively enumerates the
-    search space - sampling env_params there would just inject noise into a deterministic sweep with
-    no policy to gain robustness. is_dse_job is a property of the fully prepped config, so this is
-    validated here rather than at parse time.
+    env_params are sampled per-trial by CloudAIGymEnv, but only on an agent-driven run: a DSE sweep
+    on a *learning* agent, or an online live-RL run. A plain run has no per-trial loop at all, and a
+    grid_search DSE sweep exhaustively enumerates the space - sampling env_params there would just
+    inject noise into a deterministic sweep with no policy to gain robustness. Agent-driven status is
+    a property of the fully prepped config, so this is validated here rather than at parse time.
     """
-    offenders = [
-        tr.name
-        for tr in test_scenario.test_runs
-        if tr.test.env_params and (not tr.is_dse_job or tr.test.agent == "grid_search")
-    ]
+
+    def _cannot_sample(tr: TestRun) -> bool:
+        if not _is_dse_or_live_rl(tr):
+            return True  # neither a DSE sweep nor live-RL: env_params is never sampled
+        live_rl = bool(getattr(tr.test.cmd_args, "live_rl_mode", False))
+        # A grid_search DSE sweep ignores env_params; live-RL is exempt (it is not grid-searching).
+        return tr.is_dse_job and not live_rl and tr.test.agent == "grid_search"
+
+    offenders = [tr.name for tr in test_scenario.test_runs if tr.test.env_params and _cannot_sample(tr)]
     if offenders:
         raise TestScenarioParsingError(
             f"Tests {offenders} declare env_params but will not sample them. env_params are sampled per-trial "
-            "only by a DSE run on a learning agent (grid_search searches the whole space and ignores them). "
-            "Use a learning agent and add a sweep (a list-valued cmd_args/extra_env_vars entry or num_nodes), "
-            "or remove env_params."
+            "only on an agent-driven run: a DSE sweep on a learning agent, or cmd_args.live_rl_mode (grid_search "
+            "exhaustively searches the space and ignores them). Add a sweep with a learning agent or "
+            "live_rl_mode, or remove env_params."
         )
 
 
@@ -366,15 +382,15 @@ def handle_dry_run_and_run(args: argparse.Namespace) -> int:
     register_signal_handlers(runner.cancel_on_signal)
     logging.info(f"Scenario results will be stored at: {runner.runner.scenario_root}")
 
-    has_dse = any(tr.is_dse_job for tr in test_scenario.test_runs)
-    if args.single_sbatch or not has_dse:  # in this mode cases are unrolled using grid search
+    agent_driven = [_is_dse_or_live_rl(tr) for tr in test_scenario.test_runs]
+    if args.single_sbatch or not any(agent_driven):  # in this mode cases are unrolled using grid search
         handle_non_dse_job(runner, args)
         return 0
 
-    if all(tr.is_dse_job for tr in test_scenario.test_runs):
+    if all(agent_driven):
         return handle_dse_job(runner, args)
 
-    logging.error("Mixing DSE and non-DSE jobs is not allowed.")
+    logging.error("Mixing agent-driven (DSE / live-RL) and plain jobs is not allowed.")
     return 1
 
 
