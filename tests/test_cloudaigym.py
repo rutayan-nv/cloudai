@@ -800,6 +800,58 @@ def test_step_overlays_env_params_onto_cmd_args(tmp_path: Path) -> None:
     )
 
 
+def test_env_params_seed_defaults_to_agent_seed_when_unset(tmp_path: Path) -> None:
+    """Single seed for everything: with no ``random_seed`` in agent_config, DR draws must use the
+    agent's canonical default (``BaseAgentConfig.random_seed``), not a separate (legacy ``0``) default.
+    """
+    import random as _random
+
+    from cloudai.configurator.base_agent import BaseAgentConfig
+
+    candidates = [1, 2, 3, 4, 5, 6, 7, 8]
+    tdef = EnvVarTestDefinition(
+        name="seed",
+        description="seed",
+        test_template_name="dr_template",
+        cmd_args=EnvVarCmdArgs(ball_speed=candidates),
+        env_params={"ball_speed": EnvParamSpec()},
+        agent_metrics=["default"],
+        # agent_config intentionally omitted -> the seed must fall back to the canonical agent default.
+    )
+
+    test_run = TestRun(
+        name="seed_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        output_path=tmp_path / "out" / "seed_tr" / "0",
+    )
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+    runner.test_scenario = TestScenario(name="seed_scenario", test_runs=[test_run])
+    runner.jobs, runner.testrun_to_job_map, runner.shutting_down = {}, {}, False
+    runner.get_job_output_path.return_value = test_run.output_path
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+
+    default_seed = BaseAgentConfig.model_fields["random_seed"].default
+    assert default_seed == BaseAgentConfig().random_seed, "the canonical seed must be the single source"
+    expected = _random.Random(f"{default_seed}:ball_speed:1").choice(candidates)
+    legacy_zero = _random.Random("0:ball_speed:1").choice(candidates)
+    assert expected != legacy_zero, "candidates must distinguish the canonical default from the legacy 0"
+
+    with patch.object(env, "get_observation", side_effect=lambda _action: [1.0]):
+        env.test_run.step = 0
+        env.step({"paddle_width": 4})
+
+    ran = runner.test_scenario.test_runs[0].test.cmd_args
+    assert ran.ball_speed == expected, (
+        "with no explicit random_seed, DR must sample with the agent's canonical seed "
+        f"({default_seed}), not the legacy 0 default"
+    )
+
+
 def test_param_space_excludes_env_params_keys(setup_env: tuple[TestRun, BaseRunner]):
     """env_params keys must never surface in the grid/action space (sampled, not searched)."""
     tr, _ = setup_env

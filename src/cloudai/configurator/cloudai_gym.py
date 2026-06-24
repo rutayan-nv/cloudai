@@ -27,7 +27,7 @@ from cloudai.core import METRIC_ERROR, BaseRunner, Registry, TestRun
 from cloudai.util import flatten_dict
 from cloudai.util.lazy_imports import lazy
 
-from .base_agent import RewardOverrides
+from .base_agent import BaseAgentConfig, RewardOverrides
 from .base_gym import BaseGym
 from .env_params import CsvSink, EnvParamsObserver, EnvParamsSink, StepObserver
 
@@ -154,7 +154,11 @@ class CloudAIGymEnv(BaseGym):
         """
         observers: List[StepObserver] = []
         if self.test_run.test.env_params:
-            seed = int((self.test_run.test.agent_config or {}).get("random_seed", 0))
+            # Single seed for everything: domain-randomization draws reuse the agent's seed
+            # (BaseAgentConfig.random_seed) and its canonical default, so a run is reproducible
+            # end to end rather than the agent and the env diverging on two different seeds.
+            default_seed = BaseAgentConfig.model_fields["random_seed"].default
+            seed = int((self.test_run.test.agent_config or {}).get("random_seed", default_seed))
             self._env_sink = CsvSink(self._env_csv_path())
             observers.append(EnvParamsObserver(self.test_run.test.env_params, self.test_run.test.cmd_args, seed))
         return observers
