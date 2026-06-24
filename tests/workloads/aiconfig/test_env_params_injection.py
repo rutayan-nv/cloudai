@@ -139,6 +139,52 @@ def test_sampled_osl_overlay_reaches_predictor_command(tmp_path: Path, standalon
     assert "[" not in script.split("--osl", 1)[1][:40], "the osl candidate list must never leak into the command"
 
 
+def test_osl_is_sampled_per_trial_as_env_param(tmp_path: Path) -> None:
+    """osl must be an *environment-sampled* parameter: an env observer draws it from the candidate
+    list every trial, records it in the env_params channel, and the value varies across trials
+    (domain randomization), all under the canonical agent seed.
+    """
+    from cloudai.configurator.env_params import EnvParamsObserver
+
+    tdef = _aiconfig_tdef()
+    test_run = TestRun(
+        name="aiconfig_osl_sample_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        output_path=tmp_path / "out" / "aiconfig_osl_sample_tr" / "0",
+    )
+
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+    runner.test_scenario = TestScenario(name="aiconfig_osl_sample_scenario", test_runs=[test_run])
+    runner.jobs, runner.testrun_to_job_map, runner.shutting_down = {}, {}, False
+    runner.get_job_output_path.return_value = test_run.output_path
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+
+    # osl is wired as an environment parameter (sampled), not an agent action.
+    assert any(isinstance(o, EnvParamsObserver) for o in env.observers), (
+        "declaring [env_params.osl] must build an EnvParamsObserver that samples osl"
+    )
+
+    n_trials = 12
+    sampled: list[int] = []
+    with patch.object(env, "get_observation", side_effect=lambda _action: [1.0]):
+        env.test_run.step = 0
+        for _ in range(n_trials):
+            env.step({})
+            # current_env_params is THE env-param channel: it proves osl was sampled as env, not action.
+            sampled.append(env.test_run.current_env_params["osl"])
+
+    assert all(v in OSL_CANDIDATES for v in sampled), f"every draw must be a candidate: {sampled}"
+    # Per-trial draw is seeded f"{seed}:osl:{trial}" with the canonical seed (42); trials are 1..n.
+    expected = [random.Random(f"42:osl:{t}").choice(OSL_CANDIDATES) for t in range(1, n_trials + 1)]
+    assert sampled == expected, "osl must be drawn per trial by the env sampler under the canonical seed"
+    assert len(set(sampled)) > 1, "osl must actually vary across trials (domain randomization, not a constant)"
+
+
 def test_osl_candidate_list_leaks_without_overlay(tmp_path: Path, standalone_system: StandaloneSystem) -> None:
     """Negative control: with no overlay the static list leaks and is not int-parseable (the failure we prevent)."""
     tdef = _aiconfig_tdef()
