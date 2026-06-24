@@ -239,18 +239,7 @@ class CloudAIGymEnv(BaseGym):
         for observer in self.observers:
             observer.before_step(self.test_run)
 
-        # Overlay this trial's sampled env_params onto cmd_args so the workload actually
-        # runs with the sampled values - the env-side twin of apply_params_set(action).
-        # Sampling, persistence (env.csv), and the trajectory cache key are handled
-        # separately; this is the single, workload-agnostic injection point. Keys are
-        # validated to be cmd_args fields at TestDefinition build time; we re-filter to
-        # those fields here so a programmatically-built run can't inject unknown attrs.
-        if self.test_run.current_env_params:
-            cmd_args = self.test_run.test.cmd_args
-            fields = getattr(type(cmd_args), "model_fields", {})
-            overlay = {k: v for k, v in self.test_run.current_env_params.items() if k in fields}
-            if overlay:
-                self.test_run.test.cmd_args = cmd_args.model_copy(update=overlay)
+        self._overlay_env_params()
 
         cached_result = self.get_cached_trajectory_result(action)
         if cached_result is not None:
@@ -318,6 +307,23 @@ class CloudAIGymEnv(BaseGym):
             observer.after_step(self.test_run, observation, reward)
 
         return observation, reward, False, {}
+
+    def _overlay_env_params(self) -> None:
+        """
+        Overlay this trial's sampled env_params onto cmd_args before the workload runs.
+
+        This is the env-side twin of apply_params_set(action): the single, workload-agnostic injection
+        point. Sampling, persistence (env.csv), and the trajectory cache key are handled separately.
+        Keys are validated to be cmd_args fields at TestDefinition build time; we re-filter to those
+        fields here so a programmatically-built run can't inject unknown attrs.
+        """
+        if not self.test_run.current_env_params:
+            return
+        cmd_args = self.test_run.test.cmd_args
+        fields = getattr(type(cmd_args), "model_fields", {})
+        overlay = {k: v for k, v in self.test_run.current_env_params.items() if k in fields}
+        if overlay:
+            self.test_run.test.cmd_args = cmd_args.model_copy(update=overlay)
 
     def _online_step(self, server: GymServer, action: Any) -> Tuple[list, float, bool, dict]:
         """
