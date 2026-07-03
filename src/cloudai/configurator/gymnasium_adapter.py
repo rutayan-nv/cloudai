@@ -94,6 +94,17 @@ class GymnasiumAdapter(_GymnasiumEnvBase):
             k: v[0] for k, v in raw_action_space.items() if isinstance(v, list) and len(v) == 1
         }
 
+        # Only non-empty lists are supported today (ContinuousSpace is deferred). Reject
+        # anything else explicitly so a future non-list param type surfaces here instead of
+        # silently vanishing from the emitted parameters.
+        handled = set(self._discrete_params) | set(self._fixed_params)
+        unsupported = sorted(k for k in raw_action_space if k not in handled)
+        if unsupported:
+            raise ValueError(
+                f"Unsupported action-space entries {unsupported}: each param must be a non-empty list "
+                "of candidate values (continuous / non-list param types are not yet supported)."
+            )
+
         action_space_components: dict[str, Any] = {
             name: spaces.Discrete(len(values)) for name, values in self._discrete_params.items()
         }
