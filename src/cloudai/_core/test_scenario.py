@@ -22,13 +22,42 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Set, Type, TypeAlias, Union
 
+from pydantic import BaseModel
+
 from ..util import flatten_dict
+from .action_space import ContinuousSpace
 from .system import System
 
 if TYPE_CHECKING:
     from ..models.scenario import ReportConfig
     from ..models.workload import TestDefinition
     from .report_generation_strategy import ReportGenerationStrategy
+
+
+# Tunable container types that ``param_space`` surfaces as single (un-flattened)
+# tunables. Today: list (legacy discrete) and ContinuousSpace (range). Siblings
+# of ContinuousSpace (e.g. LogContinuousSpace) get added to this tuple when
+# they exist.
+_CONTAINER_ACTION_SPACES: tuple[type, ...] = (ContinuousSpace,)
+
+
+def _collect_action_spaces(model: BaseModel, prefix: str = "") -> dict[str, BaseModel]:
+    """Walk ``model``'s typed fields and collect non-list action-space values.
+
+    Recurses into nested Pydantic groups (e.g. ``cmd_args.trainer``) so that
+    a deeply-nested space like ``trainer.lr = ContinuousSpace(...)`` is
+    surfaced under its dotted key. Stops at any registered action-space type;
+    those are leaves regardless of whether they are also Pydantic models.
+    """
+    out: dict[str, BaseModel] = {}
+    for name in model.__class__.model_fields:
+        value = getattr(model, name, None)
+        full_key = f"{prefix}{name}"
+        if isinstance(value, _CONTAINER_ACTION_SPACES):
+            out[full_key] = value
+        elif isinstance(value, BaseModel):
+            out.update(_collect_action_spaces(value, prefix=f"{full_key}."))
+    return out
 
 
 class MetricErrorSentinel:
@@ -130,6 +159,21 @@ class TestRun:
         return None
 
     def get_metric_value(self, system: System, metric: str) -> MetricValue:
+        """Resolve a metric name to its current value.
+
+        env-randomized parameters declared on the TestDefinition take
+        precedence: when ``metric`` matches a declared env_param key, the
+        current trial's sampled value (from ``current_env_params``) is
+        returned. This lets observation vectors include trial context (e.g.,
+        ``drop_rate``) alongside measured metrics without going through the
+        post-run report. Falls back to the report-based metric lookup for
+        names that are not env_params.
+        """
+        if metric in self.test.env_params:
+            current = getattr(self, "current_env_params", {}) or {}
+            if metric in current:
+                return current[metric]
+
         report = self.metric_reporter
         if report is None:
             return METRIC_ERROR
@@ -150,13 +194,21 @@ class TestRun:
     @property
     def param_space(self) -> dict[str, Any]:
         cmd_args_dict = flatten_dict(self.test.cmd_args.model_dump())
+
+        space_overrides = _collect_action_spaces(self.test.cmd_args)
+        for key in space_overrides:
+            for k in [k for k in cmd_args_dict if k == key or k.startswith(f"{key}.")]:
+                cmd_args_dict.pop(k)
+        cmd_args_dict.update(space_overrides)
+
         extra_env_vars_dict = self.test.extra_env_vars
 
         action_space: dict[str, Any] = {
             **{
                 key: value
                 for key, value in cmd_args_dict.items()
-                if isinstance(value, list) and not self.test.is_dse_excluded_arg(key)
+                if (isinstance(value, (list,) + _CONTAINER_ACTION_SPACES))
+                and not self.test.is_dse_excluded_arg(key)
             },
             **{f"extra_env_vars.{key}": value for key, value in extra_env_vars_dict.items() if isinstance(value, list)},
         }
@@ -173,6 +225,16 @@ class TestRun:
         param_space: dict[str, Any] = self.param_space
         if not param_space:
             return []
+
+        non_enumerable = [
+            key for key, value in param_space.items() if isinstance(value, _CONTAINER_ACTION_SPACES)
+        ]
+        if non_enumerable:
+            raise TypeError(
+                f"all_combinations cannot enumerate continuous action spaces: {sorted(non_enumerable)}. "
+                "Grid-search and exhaustive sweeps require list-typed (discrete) tunables; use an "
+                "RL agent (PPO/DQN) for continuous action spaces."
+            )
 
         parameter_values: list[Any] = []
         for _, values in param_space.items():

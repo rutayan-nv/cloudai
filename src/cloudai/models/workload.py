@@ -16,6 +16,7 @@
 
 from abc import ABC
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -23,7 +24,26 @@ from typing_extensions import Self
 
 from cloudai.core import GitRepo, Installable, JobStatusResult, PythonExecutable, Registry, System, TestRun
 
+from .._core.action_space import ContinuousSpace
 from ..configurator.env_params import EnvParamSpec
+
+
+def _typed_has_action_space(model: BaseModel) -> bool:
+    """
+    Return True if any typed cmd_args field (or nested group) holds a non-list ActionSpace.
+
+    Mirrors ``_collect_action_spaces`` (test_scenario.py) but used here purely
+    as a presence check. Needed because ``model_dump()`` lowers ContinuousSpace
+    to a plain dict, so the legacy ``check_dict`` walk over ``cmd_args_dict``
+    would no longer detect a tunable surface for it.
+    """
+    for name in model.__class__.model_fields:
+        value = getattr(model, name, None)
+        if isinstance(value, ContinuousSpace):
+            return True
+        if isinstance(value, BaseModel) and _typed_has_action_space(value):
+            return True
+    return False
 
 
 class CmdArgs(BaseModel):
@@ -110,6 +130,15 @@ class TestDefinition(BaseModel, ABC):
     agent: str = "grid_search"
     agent_steps: int = 1
     agent_metrics: list[str] = Field(default=["default"])
+    agent_observation: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Observation vector exposed to the agent (names of measured metrics and/or "
+            "declared env_params). Empty (default) preserves legacy behavior: obs falls "
+            "back to agent_metrics. When set, names declared in env_params resolve to the "
+            "current trial's sampled value via TestRun.get_metric_value."
+        ),
+    )
     agent_reward_function: str = "inverse"
     agent_config: dict[str, Any] | None = Field(default=None, description="Agent configuration.")
     env_params: dict[str, EnvParamSpec] = Field(
@@ -118,6 +147,17 @@ class TestDefinition(BaseModel, ABC):
             "Domain-randomized parameters sampled by the env per trial. Sibling to "
             "cmd_args; not part of the agent's action space. CloudAIGymEnv samples, "
             "persists to env.csv, and includes them in the trajectory cache key."
+        ),
+    )
+    cache_warm_start_path: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Optional path to a prior run's trajectory.csv. When set, CloudAIGymEnv "
+            "preloads its trajectory cache with those (action, env_params) -> reward "
+            "entries so trials repeating a prior pair short-circuit cluster execution. "
+            "An env.csv sibling next to trajectory.csv is auto-discovered for "
+            "domain-randomized workloads. Distinct from agent_config.warm_start_path "
+            "(behavioral cloning), which is agent-side and orthogonal."
         ),
     )
 
@@ -156,7 +196,9 @@ class TestDefinition(BaseModel, ABC):
                         return True
             return False
 
-        return check_dict(self.cmd_args_dict) or check_dict(self.extra_env_vars)
+        if check_dict(self.cmd_args_dict) or check_dict(self.extra_env_vars):
+            return True
+        return isinstance(self.cmd_args, BaseModel) and _typed_has_action_space(self.cmd_args)
 
     @field_validator("dse_excluded_args", mode="before")
     @classmethod

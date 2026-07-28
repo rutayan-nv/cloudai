@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import csv
+import logging
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,39 @@ def cleanup():
 
     for f in {"env_vars.sh", "hostfile.txt", "start_server_wrapper.sh"}:
         (Path.cwd() / f).unlink(missing_ok=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_logging_state():
+    """Snapshot and restore global logging state around every test.
+
+    ``cloudai.cli.setup_logging`` calls ``logging.config.dictConfig`` with
+    ``disable_existing_loggers=True``, which mutates *process-global* state:
+    it flips ``disabled``/``level`` on existing loggers and can replace root
+    handlers. Without isolation, a test that invokes ``setup_logging`` (e.g.
+    the CLI and acceptance tests) leaks that state into every later test in
+    the session -- which is exactly what made the reward-pipeline logging
+    test flaky in the full suite but green in isolation.
+
+    Restoring per logger: ``disabled`` and ``level``. Plus the global
+    ``manager.disable`` level. This is sufficient to undo what dictConfig
+    does to existing loggers; handlers are managed by the fixtures/code that
+    add them.
+    """
+    manager = logging.Logger.manager
+    saved_disable = manager.disable
+    saved = {
+        name: (lg.disabled, lg.level)
+        for name, lg in manager.loggerDict.items()
+        if isinstance(lg, logging.Logger)
+    }
+    yield
+    manager.disable = saved_disable
+    for name, (disabled, level) in saved.items():
+        lg = manager.loggerDict.get(name)
+        if isinstance(lg, logging.Logger):
+            lg.disabled = disabled
+            lg.level = level
 
 
 @pytest.fixture

@@ -50,8 +50,19 @@ from ._core.runner import Runner
 from ._core.system import System
 from ._core.test_scenario import METRIC_ERROR, MetricErrorSentinel, MetricValue, TestDependency, TestRun, TestScenario
 from .configurator.base_agent import BaseAgent, BaseAgentConfig, RewardOverrides
+from .configurator.base_rl_agent import RLAgentBase
 from .configurator.cloudai_gym import CloudAIGymEnv
 from .configurator.grid_search import GridSearchAgent
+from .configurator.rewards import (
+    ContextAutoDetector,
+    GlobalMeanStdFilter,
+    IdentityTransform,
+    PerContextZScore,
+    PipelineRewardWrapper,
+    RewardPipeline,
+    RewardTransform,
+    build_default_pipeline,
+)
 from .models.workload import CmdArgs, NsysConfiguration, PredictorConfig, TestDefinition
 from .parser import Parser
 from .reporter import PerTestReporter, StatusReporter, TarballReporter
@@ -93,8 +104,17 @@ __all__ = [
     "Registry",
     "ReportGenerationStrategy",
     "Reporter",
+    "ContextAutoDetector",
+    "GlobalMeanStdFilter",
+    "IdentityTransform",
+    "PerContextZScore",
+    "PipelineRewardWrapper",
+    "RLAgentBase",
     "RewardOverrides",
+    "RewardPipeline",
+    "RewardTransform",
     "Runner",
+    "build_default_pipeline",
     "StatusReporter",
     "System",
     "SystemConfigParsingError",

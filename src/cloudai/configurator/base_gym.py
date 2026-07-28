@@ -102,3 +102,27 @@ class BaseGym(ABC):
             seed (Optional[int]): Seed for the environment's random number generator.
         """
         pass
+
+    def current_context(self) -> Dict[str, Any]:
+        """Return the current trial's environmental context as a flat dict.
+
+        Default: empty dict (env has no env_params; no per-trial context to
+        expose). Override to surface per-trial values that downstream agent
+        components need keyed access to -- e.g., reward transforms keyed on
+        ``drop_rate`` need to read it after each ``step()`` to update the
+        running per-context statistics.
+
+        Contract:
+
+        * Returns a NEW dict on each call (callers may freely mutate).
+        * Keys/values are the **raw** env_param values (pre-encoding); the
+          policy-facing encoded form lives on the observation, not here.
+        * Empty dict means "no context to expose"; the framework treats
+          this identically to an env without env_params at all.
+
+        Concrete environments (``CloudAIGymEnv``) override to expose
+        ``test_run.current_env_params`` so the per-context z-score
+        transform can find ``drop_rate`` (etc.) without depending on the
+        cloudai-specific ``test_run`` shape.
+        """
+        return {}

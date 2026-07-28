@@ -70,6 +70,21 @@ def setup_logging(log_file: str, log_level: str) -> None:
                 "level": "DEBUG",
                 "propagate": False,
             },
+            # Name the ``cloudai`` parent so that disable_existing_loggers=True
+            # never disables a cloudai child logger that happened to be created
+            # before this config runs (import-order dependent). Per the logging
+            # config rules, a logger is spared from disabling when it or an
+            # ancestor is named here. No own handlers + propagate=True keeps
+            # behavior identical (records still flow to the root handlers); the
+            # only effect is robustness. Concretely this guarantees the
+            # per-step reward-pipeline log
+            # (``cloudai.configurator.rewards.wrapper``) is never silently
+            # disabled mid-run.
+            "cloudai": {
+                "handlers": [],
+                "level": "DEBUG",
+                "propagate": True,
+            },
             "bokeh": {
                 "handlers": ["debug_file"],
                 "propagate": False,
