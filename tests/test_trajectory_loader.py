@@ -191,3 +191,55 @@ def test_load_empty_traj_csv_returns_empty_list(tmp_path: Path) -> None:
     entries = load_trajectory_with_env(traj)
 
     assert entries == []
+
+
+# ---------------------------------------------------------------------------
+# Stage 0 backward-compat: the observation column may now be
+# [<metrics...>, <context...>]. The warm-start reconstruction must peel the
+# leading metrics back off so entry.observation is context-only again, while
+# old-format (context-only) files are left untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_load_new_format_strips_leading_metrics_from_observation(tmp_path: Path) -> None:
+    """New-format rows (observation = [<metric>, <context>]) split back into metrics + context.
+
+    With num_metrics=1 and num_observation=1, an observation cell of length 2
+    is the new format, so the leading metric is peeled off and entry.observation
+    (the policy-facing vector) is context-only again.
+    """
+    traj = tmp_path / "trajectory.csv"
+    _write_trajectory_csv(traj, [(1, {"prt_ooo_threshold": 17}, 0.83, [11.5, 0.003])])
+
+    entries = load_trajectory_with_env(traj, num_metrics=1, num_observation=1)
+
+    assert len(entries) == 1
+    assert entries[0].observation == [0.003], "leading metric must be stripped from the policy observation"
+    assert entries[0].metrics == [11.5], "stripped metric value is preserved on the entry"
+
+
+def test_load_old_format_observation_unchanged(tmp_path: Path) -> None:
+    """Old-format rows (observation length == context length) are left intact.
+
+    A run written before Stage 0 has observation = [context...]. The length
+    discriminator (new format iff len == num_metrics + num_observation) must not
+    misread a genuine multi-value context and strip a real observation value.
+    """
+    traj = tmp_path / "trajectory.csv"
+    _write_trajectory_csv(traj, [(1, {"x": 1}, 0.83, [0.83, 0.0])])
+
+    entries = load_trajectory_with_env(traj, num_metrics=1, num_observation=2)
+
+    assert entries[0].observation == [0.83, 0.0], "old-format context observation must be preserved"
+    assert entries[0].metrics == []
+
+
+def test_load_defaults_do_not_strip_observation(tmp_path: Path) -> None:
+    """Existing callers (no num_metrics/num_observation) keep the legacy behavior: no stripping."""
+    traj = tmp_path / "trajectory.csv"
+    _write_trajectory_csv(traj, [(1, {"x": 1}, 0.5, [11.5, 0.003])])
+
+    entries = load_trajectory_with_env(traj)
+
+    assert entries[0].observation == [11.5, 0.003]
+    assert entries[0].metrics == []

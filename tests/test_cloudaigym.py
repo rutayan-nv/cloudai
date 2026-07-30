@@ -1166,6 +1166,157 @@ def test_raw_zero_drop_rate_preserved_in_trajectory_while_encoded_is_finite(
     )
 
 
+# ---------------------------------------------------------------------------
+# Stage 0: agent_metrics logged in trajectory.csv observation column
+# (metric FIRST, context appended), while the policy observation and the cache
+# round-trip stay context-only (observation_space unchanged).
+# ---------------------------------------------------------------------------
+
+
+def _last_observation_cell(csv_path: Path):
+    """Parse the ``observation`` cell (column index 3) of the last trajectory.csv row."""
+    import ast
+    import csv as _csv
+
+    with csv_path.open(newline="") as f:
+        rows = list(_csv.reader(f))
+    return ast.literal_eval(rows[-1][3])
+
+
+def test_write_trajectory_observation_column_is_metric_then_context(base_tr: TestRun, tmp_path: Path) -> None:
+    """The CSV ``observation`` column serializes ``metrics + observation`` (metric first).
+
+    write_trajectory is the *only* place the two are combined; the header stays
+    at 4 columns and ``TrajectoryEntry.observation`` itself is untouched.
+    """
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+    env = CloudAIGymEnv(test_run=base_tr, runner=runner, rewards=RewardOverrides())
+
+    env.write_trajectory(
+        TrajectoryEntry(
+            step=1,
+            action={"prt_ooo_threshold": 17},
+            reward=0.83,
+            observation=[0.003],
+            metrics=[11.5],
+        )
+    )
+
+    header = env.trajectory_file_path.read_text().strip().splitlines()[0]
+    assert header == "step,action,reward,observation", "header must stay 4 columns (no new column)"
+    assert _last_observation_cell(env.trajectory_file_path) == [11.5, 0.003]
+
+
+def test_step_fresh_path_logs_metric_then_context_and_keeps_obs_context_only(
+    nemorun: NeMoRunTestDefinition, tmp_path: Path
+) -> None:
+    """Fresh step: CSV observation = metric+context; policy obs + entry.observation stay context-only."""
+    tdef = nemorun.model_copy(deep=True)
+    tdef.cmd_args.data.global_batch_size = 8
+    tdef.agent_metrics = ["bus_bw"]
+    tdef.agent_observation = ["drop_rate"]
+    test_run = TestRun(
+        name="fresh_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        output_path=tmp_path / "out" / "fresh_tr" / "0",
+        reports={NeMoRunReportGenerationStrategy},
+    )
+    test_scenario = TestScenario(name="fresh_scenario", test_runs=[test_run])
+
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+    runner.test_scenario = test_scenario
+    runner.jobs, runner.testrun_to_job_map, runner.shutting_down = {}, {}, False
+    runner.get_job_output_path.return_value = test_run.output_path
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+    env.test_run.step = 0
+
+    with (
+        patch.object(env, "get_observation", return_value=[0.003]),
+        patch.object(env, "_resolve_metric_values", return_value=[123.4]),
+    ):
+        obs, _reward, _done, _info = env.step({"trainer.max_steps": 1000})
+
+    assert obs == [0.003], "policy observation must remain context-only (metric NOT prepended into the returned obs)"
+
+    entry = env.trajectory[0][-1]
+    assert entry.observation == [0.003], "TrajectoryEntry.observation must stay context-only for the cache round-trip"
+    assert entry.metrics == [123.4], "metric value is carried separately on the entry"
+    assert _last_observation_cell(env.trajectory_file_path) == [123.4, 0.003]
+
+
+def test_step_cache_hit_logs_cached_metrics_and_returns_context_only_obs(
+    nemorun: NeMoRunTestDefinition, tmp_path: Path
+) -> None:
+    """Cache hit: returned obs + appended entry.observation are context-only; CSV = cached metric+context."""
+    tdef = nemorun.model_copy(deep=True)
+    tdef.cmd_args.data.global_batch_size = 8
+    tdef.agent_metrics = ["bus_bw"]
+    tdef.agent_observation = ["drop_rate"]
+    test_run = TestRun(
+        name="cachehit_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        reports={NeMoRunReportGenerationStrategy},
+    )
+
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+    action = {"trainer.max_steps": 1000}
+    env.test_run.current_iteration = 0
+    env.trajectory = {0: [TrajectoryEntry(step=1, action=action, reward=0.42, observation=[0.003], metrics=[123.4])]}
+
+    env.test_run.step = 4
+    env.reset()
+    obs, reward, done, _info = env.step(action)
+
+    runner.run.assert_not_called()
+    assert obs == [0.003], "cache-hit returns the cached context-only observation (shape must match obs space)"
+    assert reward == 0.42 and done is False
+
+    appended = env.trajectory[0][-1]
+    assert appended.step == 5
+    assert appended.observation == [0.003], "appended entry.observation stays context-only"
+    assert appended.metrics == [123.4], "cache-hit entry re-uses the cached metric values"
+    assert _last_observation_cell(env.trajectory_file_path) == [123.4, 0.003]
+
+
+def test_metric_logging_does_not_widen_observation_space(nemorun: NeMoRunTestDefinition, tmp_path: Path) -> None:
+    """observation_space is derived from agent_observation (context) only, not agent_metrics.
+
+    Proves the Stage 0 change is CSV-only: adding a metric to the logged record
+    does not add a slot to the policy's observation space.
+    """
+    tdef = nemorun.model_copy(deep=True)
+    tdef.agent_metrics = ["bus_bw"]
+    tdef.agent_observation = ["drop_rate"]
+    test_run = TestRun(
+        name="obsspace_tr",
+        test=tdef,
+        num_nodes=1,
+        nodes=[],
+        reports={NeMoRunReportGenerationStrategy},
+    )
+    runner = MagicMock(spec=BaseRunner)
+    runner.scenario_root = tmp_path / "scenario"
+    runner.system = MagicMock()
+
+    env = CloudAIGymEnv(test_run=test_run, runner=runner, rewards=RewardOverrides())
+
+    assert env.define_observation_space() == [0.0], "one slot for the context name drop_rate; bus_bw metric excluded"
+    assert env.observation_names() == ["drop_rate"]
+
+
 def _write_prior_trajectory(tmp_path: Path, rows: list[tuple[int, dict, float, list]]) -> Path:
     """Write a fake prior-run trajectory.csv and return its path."""
     import csv as _csv

@@ -31,13 +31,31 @@ from .env_params import CsvSink, EnvParamsObserver, ObsLeafDescriptor, StepObser
 
 @dataclasses.dataclass(frozen=True)
 class TrajectoryEntry:
-    """Represents a trajectory entry."""
+    """
+    Represents a trajectory entry.
+
+    Attributes:
+        step: The trial index (advanced at the ``reset()`` trial boundary).
+        action: The action applied to the ``TestRun`` for this trial.
+        reward: The reward computed for this trial.
+        observation: The *context-only* observation vector handed back to the
+            policy (matches the env ``observation_space``). This is what the
+            in-run cache and the warm-start loader replay to the policy on a
+            cache hit, so it must never carry the metric values.
+        env_params: The trial's sampled ``env_params`` (part of the cache key).
+        metrics: The resolved ``agent_metrics`` values for this trial. Kept
+            separate from ``observation`` and combined with it *only* at
+            CSV-write time (see :meth:`CloudAIGymEnv.write_trajectory`), so the
+            logged ``observation`` column reads ``metrics + observation`` while
+            the policy-facing observation stays context-only.
+    """
 
     step: int
     action: dict[str, Any]
     reward: float
     observation: list
     env_params: dict[str, Any] = dataclasses.field(default_factory=dict)
+    metrics: list = dataclasses.field(default_factory=list)
 
 
 class CloudAIGymEnv(BaseGym):
@@ -76,6 +94,12 @@ class CloudAIGymEnv(BaseGym):
         prior ``(action, env_params)`` pair short-circuit cluster execution.
         Missing/unreadable paths log a warning and leave the cache empty
         rather than aborting the run.
+
+        The metric/observation counts are threaded to the loader so it can peel
+        the Stage-0 ``metrics + observation`` prefix back off new-format files
+        and reconstruct a context-only ``observation`` that still matches the
+        policy ``observation_space``; old-format (context-only) files are
+        detected by length and left untouched.
         """
         path = getattr(self.test_run.test, "cache_warm_start_path", None)
         if path is None:
@@ -83,7 +107,11 @@ class CloudAIGymEnv(BaseGym):
         from .trajectory_loader import load_trajectory_with_env
 
         try:
-            entries = load_trajectory_with_env(path)
+            entries = load_trajectory_with_env(
+                path,
+                num_metrics=len(self.test_run.test.agent_metrics),
+                num_observation=len(self.observation_names()),
+            )
         except FileNotFoundError as exc:
             logging.warning("cache_warm_start_path: %s; trajectory cache will start empty.", exc)
             return
@@ -281,6 +309,7 @@ class CloudAIGymEnv(BaseGym):
                     reward=cached_result.reward,
                     observation=cached_result.observation,
                     env_params=dict(self.test_run.current_env_params),
+                    metrics=list(cached_result.metrics),
                 )
             )
             for observer in self.observers:
@@ -321,6 +350,7 @@ class CloudAIGymEnv(BaseGym):
                 reward=reward,
                 observation=observation,
                 env_params=dict(self.test_run.current_env_params),
+                metrics=self._resolve_metric_values(),
             )
         )
 
@@ -443,7 +473,16 @@ class CloudAIGymEnv(BaseGym):
         return observation
 
     def write_trajectory(self, entry: TrajectoryEntry):
-        """Append the trajectory to the CSV file and to the local attribute."""
+        """
+        Append the trajectory to the CSV file and to the local attribute.
+
+        The ``observation`` column serializes ``metrics + observation`` (metric
+        values first, context appended) — the same vector the reward function
+        receives — so raw metric(s) such as ``bus_bw`` are recoverable per trial
+        without joining ``summary.json``. This combination happens *only* here;
+        ``entry.observation`` stays context-only for the policy/cache round-trip.
+        The header keeps its four columns.
+        """
         self.current_trajectory.append(entry)
 
         file_exists = self.trajectory_file_path.exists()
@@ -454,7 +493,7 @@ class CloudAIGymEnv(BaseGym):
             writer = csv.writer(file)
             if not file_exists:
                 writer.writerow(["step", "action", "reward", "observation"])
-            writer.writerow([entry.step, entry.action, entry.reward, entry.observation])
+            writer.writerow([entry.step, entry.action, entry.reward, list(entry.metrics) + list(entry.observation)])
 
     @property
     def trajectory_file_path(self) -> Path:

@@ -40,6 +40,9 @@ from .cloudai_gym import TrajectoryEntry
 def load_trajectory_with_env(
     traj_csv: Path,
     env_csv: Optional[Path] = None,
+    *,
+    num_metrics: int = 0,
+    num_observation: Optional[int] = None,
 ) -> list[TrajectoryEntry]:
     """
     Load a prior run's trajectory + env-params into ``TrajectoryEntry`` list.
@@ -53,6 +56,17 @@ def load_trajectory_with_env(
             sibling is silently treated as "no env_params recorded" (correct
             for workloads with no ``[env_params.*]`` block). An explicit
             path that does not exist raises ``FileNotFoundError``.
+        num_metrics: Number of leading ``agent_metrics`` values that a
+            Stage-0 ``observation`` cell prepends (``metrics + observation``).
+            ``0`` (default) disables splitting entirely, which reproduces the
+            pre-Stage-0 behavior for existing callers.
+        num_observation: Length of the context-only observation vector
+            (``len(agent_observation)`` with the ``agent_metrics`` fallback).
+            Used together with ``num_metrics`` to tell new-format cells apart
+            from old-format ones by length: a cell is treated as new format
+            (metrics stripped) only when its length equals
+            ``num_metrics + num_observation``; otherwise it is left intact as a
+            context-only observation. ``None`` (default) disables splitting.
 
     Returns:
         A list of ``TrajectoryEntry`` ordered as in ``traj_csv``. Rows with
@@ -60,6 +74,10 @@ def load_trajectory_with_env(
         no-ops) and rows whose ``action`` is not a parseable mapping are
         skipped. Returns ``[]`` when nothing survives filtering — empty
         prefill is not an error for the cache use case.
+
+        When splitting applies, each entry's ``observation`` is reconstructed
+        context-only (so it matches the policy ``observation_space``) and the
+        peeled-off metric values are stored on ``TrajectoryEntry.metrics``.
 
     Raises:
         FileNotFoundError: ``traj_csv`` does not exist, or an explicitly
@@ -74,7 +92,7 @@ def load_trajectory_with_env(
     entries: list[TrajectoryEntry] = []
     with traj_path.open() as fh:
         for row in csv.DictReader(fh):
-            entry = _parse_trajectory_row(row, env_by_step)
+            entry = _parse_trajectory_row(row, env_by_step, num_metrics, num_observation)
             if entry is not None:
                 entries.append(entry)
     return entries
@@ -114,6 +132,8 @@ def _load_env_by_step(traj_path: Path, env_csv: Optional[Path]) -> Dict[int, Dic
 def _parse_trajectory_row(
     row: Dict[str, str],
     env_by_step: Dict[int, Dict[str, Any]],
+    num_metrics: int = 0,
+    num_observation: Optional[int] = None,
 ) -> Optional[TrajectoryEntry]:
     """Parse one trajectory.csv row; return ``None`` to drop it."""
     try:
@@ -137,6 +157,8 @@ def _parse_trajectory_row(
     if not isinstance(observation, list):
         observation = []
 
+    metrics, observation = _split_metrics_from_observation(observation, num_metrics, num_observation)
+
     try:
         step = int(row["step"])
     except (KeyError, TypeError, ValueError):
@@ -148,4 +170,25 @@ def _parse_trajectory_row(
         reward=reward,
         observation=observation,
         env_params=env_by_step.get(step, {}),
+        metrics=metrics,
     )
+
+
+def _split_metrics_from_observation(
+    observation: list,
+    num_metrics: int,
+    num_observation: Optional[int],
+) -> tuple[list, list]:
+    """
+    Peel a Stage-0 ``metrics + observation`` prefix off a logged cell.
+
+    Returns ``(metrics, observation)``. A cell is only treated as new format
+    (metrics stripped) when ``num_metrics > 0`` and its length matches
+    ``num_metrics + num_observation`` exactly; this length check keeps
+    old-format context-only cells (length ``num_observation``) untouched, since
+    the two lengths can only collide when ``num_metrics == 0``. Any other case
+    leaves the observation intact with empty metrics.
+    """
+    if num_metrics > 0 and num_observation is not None and len(observation) == num_metrics + num_observation:
+        return observation[:num_metrics], observation[num_metrics:]
+    return [], observation
