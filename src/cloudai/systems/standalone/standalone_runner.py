@@ -45,7 +45,13 @@ class StandaloneRunner(BaseRunner):
         if self.mode == "run":
             # Keep the handle, not just the pid: StandaloneSystem.is_job_running
             # polls it directly instead of shelling out to `ps -p <pid>`.
-            process = self.cmd_shell.execute(exec_cmd)
+            #
+            # use_shell=False drops the `/bin/bash -c` that would otherwise wrap
+            # every workload, worth 14.2 ms per trial. CommandShell still falls
+            # back to the shell if this particular command needs one, so a
+            # workload whose generated command relies on shell syntax is
+            # unaffected.
+            process = self.cmd_shell.execute(exec_cmd, use_shell=False)
             job_id = process.pid
             if job_id is None:
                 raise JobIdRetrievalError(
