@@ -15,6 +15,8 @@
 # limitations under the License.
 
 
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -89,6 +91,93 @@ def test_is_job_running(mock_execute, standalone_system, standalone_job, ps_outp
     mock_execute.return_value = mock_process
 
     assert standalone_system.is_job_running(standalone_job) == expected_result
+
+
+@pytest.mark.parametrize(
+    "returncode, expected_result",
+    [
+        (None, True),  # poll() returns None while the process is alive
+        (0, False),  # a returncode means it has exited
+        (137, False),  # including a non-zero one
+    ],
+)
+@patch("cloudai.util.CommandShell.execute")
+def test_is_job_running_uses_process_handle(
+    mock_execute, standalone_system, mock_test, returncode, expected_result
+):
+    """With a handle available, status comes from poll() rather than ps."""
+    process = MagicMock()
+    process.poll.return_value = returncode
+    job = StandaloneJob(mock_test, id=12345, process=process)
+
+    assert standalone_system.is_job_running(job) is expected_result
+    process.poll.assert_called_once()
+    # The point of the handle: no subprocess is created to answer the question.
+    mock_execute.assert_not_called()
+
+
+def test_is_job_running_on_a_real_process(standalone_system, mock_test):
+    """End to end against a real process, no mocks.
+
+    Guards the whole path: a live process reads as running, and once it exits the
+    handle reports completion. The ps-based version could get this wrong if the
+    pid were recycled.
+    """
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    job = StandaloneJob(mock_test, id=process.pid, process=process)
+    try:
+        assert standalone_system.is_job_running(job) is True
+    finally:
+        process.kill()
+        process.wait()
+    assert standalone_system.is_job_running(job) is False
+
+
+def test_is_job_running_falls_back_to_ps_without_a_handle(standalone_system, mock_test):
+    """Dry-run jobs and any caller that kept only a pid must still work."""
+    job = StandaloneJob(mock_test, id=12345)
+    assert job.process is None
+    with patch("cloudai.util.CommandShell.execute") as mock_execute:
+        mock_execute.return_value.communicate.return_value = ("12345\n", "")
+        assert standalone_system.is_job_running(job) is True
+    mock_execute.assert_called_once_with("ps -p 12345")
+
+
+@patch("cloudai.util.CommandShell.execute")
+def test_kill_uses_handle_and_reaps(mock_execute, standalone_system, mock_test):
+    process = MagicMock()
+    process.poll.return_value = None  # still running
+    job = StandaloneJob(mock_test, id=12345, process=process)
+
+    standalone_system.kill(job)
+
+    process.kill.assert_called_once()
+    process.wait.assert_called_once()  # reaped, so no zombie is left
+    mock_execute.assert_not_called()
+
+
+@patch("cloudai.util.CommandShell.execute")
+def test_kill_already_exited_process_only_reaps(mock_execute, standalone_system, mock_test):
+    process = MagicMock()
+    process.poll.return_value = 0  # already finished
+    job = StandaloneJob(mock_test, id=12345, process=process)
+
+    standalone_system.kill(job)
+
+    process.kill.assert_not_called()
+    process.wait.assert_called_once()
+    mock_execute.assert_not_called()
+
+
+def test_monitor_interval_accepts_sub_second_values():
+    """Short trials need a poll interval between 0 and 1 second."""
+    system = StandaloneSystem(
+        name="s",
+        install_path=Path("/fake"),
+        output_path=Path("/fake"),
+        monitor_interval=0.005,
+    )
+    assert system.monitor_interval == pytest.approx(0.005)
 
 
 @patch("cloudai.util.CommandShell.execute")

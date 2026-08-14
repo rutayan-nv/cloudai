@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, field
+from typing import Optional
 
 from cloudai.core import BaseJob
 
@@ -23,4 +25,13 @@ from cloudai.core import BaseJob
 class StandaloneJob(BaseJob):
     """A job class for standalone execution."""
 
-    pass
+    # The live handle to the submitted process. Without it, completion has to be
+    # checked by shelling out to ``ps -p <pid>``, which costs two forks and two
+    # pipe reads (~10 ms) where ``Popen.poll()`` is a single waitpid (~1 us).
+    # Retaining the handle also removes a correctness hazard: a pid is only
+    # unique while its process lives, so a recycled pid can make a finished job
+    # look like it is still running.
+    #
+    # Excluded from equality and repr: two jobs are the same job by test_run and
+    # id, and a Popen's repr is noise in logs.
+    process: Optional[subprocess.Popen] = field(default=None, compare=False, repr=False)

@@ -41,11 +41,14 @@ class StandaloneRunner(BaseRunner):
         exec_cmd = self.get_cmd_gen_strategy(self.system, tr).gen_exec_command()
         logging.info(f"Executing command for test {tr.name}: {exec_cmd}")
         job_id = 0
+        process = None
         if self.mode == "run":
-            pid = self.cmd_shell.execute(exec_cmd).pid
-            job_id = pid
+            # Keep the handle, not just the pid: StandaloneSystem.is_job_running
+            # polls it directly instead of shelling out to `ps -p <pid>`.
+            process = self.cmd_shell.execute(exec_cmd)
+            job_id = process.pid
             if job_id is None:
                 raise JobIdRetrievalError(
                     test_name=str(tr.name), command=exec_cmd, stdout="", stderr="", message="Failed to retrieve job ID."
                 )
-        return StandaloneJob(tr, id=job_id)
+        return StandaloneJob(tr, id=job_id, process=process)
